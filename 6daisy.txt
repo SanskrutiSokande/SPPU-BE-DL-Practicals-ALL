@@ -1,0 +1,116 @@
+import os
+import tensorflow as tf
+import cv2
+import urllib.request
+import tarfile
+from google.colab.patches import cv2_imshow
+
+# Download and extract flower photos dataset
+flowers_url = "https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz"
+data_dir = "./flower_photos"
+urllib.request.urlretrieve(flowers_url, "flower_photos.tgz")
+with tarfile.open("flower_photos.tgz", "r:gz") as tar:
+    tar.extractall(path=data_dir)
+
+# Manually define class names based on the dataset structure
+class_names = ['daisy', 'dandelion', 'roses', 'sunflowers', 'tulips']
+print("Class names from the dataset:", class_names)
+
+# Set parameters
+height, width = 128, 128  # Adjust resolution if needed
+training_batch_size = 16  # Batch size for training
+
+# Load datasets
+train_set = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="training",
+    seed=123,
+    image_size=(height, width),
+    batch_size=training_batch_size
+)
+
+validation_set = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="validation",
+    seed=123,
+    image_size=(height, width),
+    batch_size=training_batch_size
+)
+
+# Normalize data and prefetch for faster loading
+normalization_layer = tf.keras.layers.Rescaling(1./255)
+train_set = train_set.map(lambda x, y: (normalization_layer(x), y)).prefetch(buffer_size=tf.data.AUTOTUNE)
+validation_set = validation_set.map(lambda x, y: (normalization_layer(x), y)).prefetch(buffer_size=tf.data.AUTOTUNE)
+
+# Print the number of classes
+print("Number of classes:", len(class_names))
+
+# Load a pre-trained model (e.g., MobileNetV2 for efficiency) and set up custom layers
+base_model = tf.keras.applications.MobileNetV2(weights='imagenet', include_top=False, input_shape=(height, width, 3))
+
+# Freeze layers for initial training
+for layer in base_model.layers[:120]:  # Adjust number of frozen layers as needed
+    layer.trainable = False
+
+# Add custom classifier layers
+x = tf.keras.layers.Flatten()(base_model.output)
+x = tf.keras.layers.Dense(512, activation='relu')(x)
+output = tf.keras.layers.Dense(len(class_names), activation='softmax')(x)  # Use len(class_names)
+
+# Combine base model and custom layers into a new model
+model = tf.keras.Model(inputs=base_model.input, outputs=output)
+
+# Compile and train the classifier layers first
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+history_initial = model.fit(train_set, epochs=5, validation_data=validation_set)
+
+# Fine-tune with more layers unfrozen and a lower learning rate
+for layer in base_model.layers[120:]:
+    layer.trainable = True
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+history_fine = model.fit(train_set, epochs=2, validation_data=validation_set)
+
+# Save the model
+model.save("fine_tuned_flower_model_optimized.h5")
+
+# Evaluate the model on the validation set
+test_loss, test_accuracy = model.evaluate(validation_set)
+print(f"Test Loss: {test_loss}, Test Accuracy: {test_accuracy}")
+
+# Load and preprocess a sample image for prediction
+def preprocess_image(image_path):
+    img = cv2.imread(image_path)
+    img = cv2.resize(img, (height, width))  # Resize to match model input size
+    img = img / 255.0  # Normalize the image
+    img = img.reshape(1, height, width, 3)  # Add batch dimension
+    return img
+
+# Make sure to upload a sample image from your local device
+from google.colab import files
+uploaded = files.upload()  # This will prompt you to upload an image
+
+# Load the uploaded image for prediction
+sample_image_path = next(iter(uploaded))  # Get the uploaded file name
+processed_image = preprocess_image(sample_image_path)
+
+# Load the saved model for prediction
+loaded_model = tf.keras.models.load_model("fine_tuned_flower_model_optimized.h5")
+
+# Make prediction
+predictions = loaded_model.predict(processed_image)
+predicted_class = class_names[tf.argmax(predictions[0]).numpy()]  # Get the name of the predicted class
+predicted_confidence = tf.reduce_max(predictions[0]).numpy()  # Get the confidence of the prediction
+
+# Display prediction results
+print(f"Predicted Class: {predicted_class}, Confidence: {predicted_confidence:.2f}")
+
+# Load and display the uploaded image
+sample_image = cv2.imread(sample_image_path)
+
+# Show the original image
+if sample_image is not None:
+    cv2_imshow(sample_image)  # Show the original image
+else:
+    print("Error: Sample image not found or could not be loaded.")
